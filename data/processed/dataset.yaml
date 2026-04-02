@@ -1,0 +1,10 @@
+path: d:\SEM 6\AIP\Project\data\processed
+train: train/images
+val: valid/images
+test: test/images
+nc: 4
+names:
+- person
+- car
+- bicycle
+- dog

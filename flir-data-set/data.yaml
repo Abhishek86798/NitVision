@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 3
+names: ['car', 'dog', 'person']
+
+roboflow:
+  workspace: thermal-imaging-0hwfw
+  project: flir-data-set
+  version: 27
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/thermal-imaging-0hwfw/flir-data-set/dataset/27
