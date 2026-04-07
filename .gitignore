@@ -1,0 +1,41 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv_aip/
+venv/
+.venv/
+env/
+.env
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# Datasets
+data/
+flir-data-set/
+
+# Weights / Models
+*.pt
+models/*.pt
+notebooks/*.pt
+
+# YOLO / Ultralytics Training Runs
+runs/
+notebooks/runs/
+
+# Streamlit
+.streamlit/
+# !.streamlit/config.toml
+
+# VS Code / Kiro / IDEs
+.vscode/
+.idea/
+.kiro/
+*.code-workspace
+
+# OS generated files
+.DS_Store
+Thumbs.db

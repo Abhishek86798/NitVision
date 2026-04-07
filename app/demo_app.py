@@ -1,131 +1,344 @@
+import streamlit as st
 import os
 import cv2
+import tempfile
 import numpy as np
-import streamlit as st
 from PIL import Image
-from collections import defaultdict
 
-# ── Page config ──────────────────────────────────────────────────────────────
+try:
+    from ultralytics import YOLO
+except ImportError:
+    pass
+
+# ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Night Vision Object Detection",
-    page_icon="🌡️",
+    page_title="NitVision – Object Detection",
+    page_icon="🔭",
     layout="wide",
 )
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-MODEL_PATH  = os.path.join(os.path.dirname(__file__), "..", "models", "best.pt")
-CLASS_NAMES = ["Person", "Car", "Bicycle", "Dog"]
+# ── Custom CSS ─────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+    .main-title {
+        font-size: 2.4rem;
+        font-weight: 800;
+        background: linear-gradient(135deg, #00d4ff, #7b2ff7);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0;
+    }
+    .subtitle {
+        color: #a0a0b0;
+        font-size: 1rem;
+        margin-top: 0;
+        margin-bottom: 1.5rem;
+    }
+    .stat-box {
+        background: #1e1e2e;
+        border-radius: 10px;
+        padding: 1rem;
+        border: 1px solid #333;
+    }
+    div[data-testid="stTab"] button {
+        font-size: 1rem;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# ── Load model (cached so it only loads once) ─────────────────────────────────
-@st.cache_resource
+st.markdown('<p class="main-title">🔭 NitVision</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">Real-time object detection powered by YOLOv5 · Person · Car · Bicycle · Dog</p>', unsafe_allow_html=True)
+st.divider()
+
+# ── Model loading ─────────────────────────────────────────────────────────────
+current_dir = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH  = os.path.join(current_dir, "..", "models", "yolov5su.pt")
+
+@st.cache_resource(show_spinner="Loading model…")
 def load_model(path):
-    from ultralytics import YOLO
-    return YOLO(path)
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.title("⚙️ Settings")
-
-conf_threshold = st.sidebar.slider(
-    "Confidence Threshold",
-    min_value=0.1,
-    max_value=0.9,
-    value=0.3,
-    step=0.05,
-)
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("**Detectable Classes**")
-for cls in CLASS_NAMES:
-    st.sidebar.markdown(f"- {cls}")
-
-# ── Main title ────────────────────────────────────────────────────────────────
-st.title("🌡️ Night Vision Object Detection")
-st.markdown(
-    "Upload a **FLIR thermal infrared image** to detect objects using a "
-    "YOLOv8s model fine-tuned on the FLIR ADAS thermal dataset."
-)
-st.markdown("---")
-
-# ── Check model exists before anything else ───────────────────────────────────
-if not os.path.exists(MODEL_PATH):
-    st.error(
-        f"❌ **Model not found:** `models/best.pt`\n\n"
-        f"Please run **02_train.ipynb** first to train the model. "
-        f"The trained weights will be saved to `models/best.pt` automatically."
-    )
-    st.stop()
+    if not os.path.exists(path):
+        return None
+    try:
+        from ultralytics import YOLO
+        return YOLO(path)
+    except ImportError:
+        st.error("ultralytics not installed. Run: `pip install ultralytics`")
+        st.stop()
 
 model = load_model(MODEL_PATH)
 
-# ── File uploader ─────────────────────────────────────────────────────────────
-uploaded = st.file_uploader(
-    "Upload a thermal image (JPG or PNG)",
-    type=["jpg", "jpeg", "png"],
-)
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Detection Settings")
+    conf_threshold = st.slider(
+        "Confidence Threshold",
+        min_value=0.10, max_value=0.90, value=0.30, step=0.05,
+        help="Only show detections above this confidence score"
+    )
+    iou_threshold = st.slider(
+        "IoU Threshold (NMS)",
+        min_value=0.10, max_value=0.90, value=0.45, step=0.05,
+        help="Overlap threshold for non-maximum suppression"
+    )
+    st.divider()
+    st.markdown("### 📦 Model")
+    st.code("YOLOv5su (ultralytics)", language=None)
+    st.divider()
+    st.markdown("### 🏷️ Classes")
+    st.markdown("🧍 Person · 🚗 Car · 🐕 Dog")
 
-if uploaded is not None:
+# ── Guard: model missing ──────────────────────────────────────────────────────
+if model is None:
+    st.error(
+        f"❌ Model not found at `{os.path.abspath(MODEL_PATH)}`\n\n"
+        "Make sure `yolov5su.pt` exists inside the `models/` folder."
+    )
+    st.stop()
 
-    # Read uploaded image as numpy array (RGB)
-    pil_img  = Image.open(uploaded).convert("RGB")
-    img_rgb  = np.array(pil_img)
-    img_bgr  = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+# ── Helper: detection stats table ─────────────────────────────────────────────
+def build_stats_table(result):
+    boxes   = result.boxes
+    classes = result.names
+    if len(boxes) == 0:
+        return None
+    stats = {}
+    for box in boxes:
+        cls_id   = int(box.cls[0].item())
+        conf     = float(box.conf[0].item())
+        cls_name = classes[cls_id]
+        if cls_name not in stats:
+            stats[cls_name] = {"count": 0, "conf_sum": 0.0, "max_conf": 0.0}
+        stats[cls_name]["count"]    += 1
+        stats[cls_name]["conf_sum"] += conf
+        stats[cls_name]["max_conf"]  = max(stats[cls_name]["max_conf"], conf)
+    return [
+        {
+            "Class":           cls_name,
+            "Count":           d["count"],
+            "Avg Confidence":  f"{d['conf_sum'] / d['count']:.2%}",
+            "Max Confidence":  f"{d['max_conf']:.2%}",
+        }
+        for cls_name, d in sorted(stats.items(), key=lambda x: -x[1]["count"])
+    ]
 
-    # Run inference
-    with st.spinner("Running inference..."):
-        results = model.predict(
-            source  = img_bgr,
-            conf    = conf_threshold,
-            iou     = 0.45,
-            imgsz   = 640,
-            verbose = False,
-        )
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TABS
+# ═══════════════════════════════════════════════════════════════════════════════
+tab_image, tab_video = st.tabs(["🖼️  Image Detection", "🎬  Video Detection"])
 
-    result     = results[0]
-    annotated  = result.plot()                          # BGR with boxes drawn
-    annotated  = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
 
-    # ── Side-by-side display ──────────────────────────────────────────────────
-    col_left, col_right = st.columns(2)
+# ──────────────────────────────────────────────────────────────────────────────
+#  TAB 1 — IMAGE
+# ──────────────────────────────────────────────────────────────────────────────
+with tab_image:
+    st.markdown("#### Upload an image to detect objects")
 
-    with col_left:
-        st.subheader("Original Image")
-        st.image(img_rgb, use_container_width=True)
+    uploaded_image = st.file_uploader(
+        "Choose a JPG or PNG image",
+        type=["jpg", "jpeg", "png"],
+        key="img_uploader",
+    )
 
-    with col_right:
-        st.subheader("Detections")
-        st.image(annotated, use_container_width=True)
+    if uploaded_image:
+        try:
+            image = Image.open(uploaded_image).convert("RGB")
 
-    # ── Detection table ───────────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("Detection Summary")
+            col1, col2 = st.columns(2, gap="medium")
+            with col1:
+                st.markdown("**Original Image**")
+                st.image(image, use_container_width=True)
 
-    boxes       = result.boxes
-    class_ids   = boxes.cls.cpu().numpy().astype(int)
-    confidences = boxes.conf.cpu().numpy()
+            with st.spinner("Running detection…"):
+                results = model.predict(
+                    image,
+                    conf=conf_threshold,
+                    iou=iou_threshold,
+                    verbose=False,
+                )
+                result  = results[0]
+                res_img = result.plot()   # numpy RGB array
 
-    if len(class_ids) == 0:
-        st.info("No objects detected at the current confidence threshold. Try lowering it.")
+            with col2:
+                st.markdown("**Detected Objects**")
+                st.image(res_img, use_container_width=True)
+
+            # Metrics row
+            boxes = result.boxes
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Detections", len(boxes))
+            if len(boxes) > 0:
+                avg_conf = float(boxes.conf.mean().item())
+                max_conf = float(boxes.conf.max().item())
+                m2.metric("Avg Confidence", f"{avg_conf:.2%}")
+                m3.metric("Max Confidence", f"{max_conf:.2%}")
+
+            # Stats table
+            table = build_stats_table(result)
+            if table:
+                st.markdown("#### 📊 Detection Summary")
+                st.table(table)
+            else:
+                st.info("No objects detected. Try lowering the **Confidence Threshold** in the sidebar.")
+
+        except Exception as e:
+            st.error(f"Error during detection: {e}")
     else:
-        # Aggregate count + avg confidence per class
-        agg = defaultdict(lambda: {"count": 0, "conf_sum": 0.0})
-        for cls_id, conf in zip(class_ids, confidences):
-            name = CLASS_NAMES[cls_id] if cls_id < len(CLASS_NAMES) else str(cls_id)
-            agg[name]["count"]    += 1
-            agg[name]["conf_sum"] += conf
+        st.info("⬆️ Upload an image above to get started.")
 
-        table_data = [
-            {
-                "Class":           name,
-                "Count":           v["count"],
-                "Avg Confidence":  f"{v['conf_sum'] / v['count']:.2f}",
-            }
-            for name, v in sorted(agg.items(), key=lambda x: -x[1]["count"])
-        ]
 
-        st.table(table_data)
+# ──────────────────────────────────────────────────────────────────────────────
+#  TAB 2 — VIDEO
+# ──────────────────────────────────────────────────────────────────────────────
+with tab_video:
+    st.markdown("#### Upload a video to run frame-by-frame detection")
 
-        total = sum(v["count"] for v in agg.values())
-        st.caption(f"Total detections: **{total}** &nbsp;|&nbsp; Confidence threshold: **{conf_threshold}**")
+    uploaded_video = st.file_uploader(
+        "Choose an MP4, AVI, or MOV file",
+        type=["mp4", "avi", "mov", "mkv"],
+        key="vid_uploader",
+    )
 
-else:
-    st.info("👆 Upload a thermal image to get started.")
+    if uploaded_video:
+        # Write to temp input file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_in:
+            tmp_in.write(uploaded_video.read())
+            tmp_in_path = tmp_in.name
+
+        cap = cv2.VideoCapture(tmp_in_path)
+
+        if not cap.isOpened():
+            st.error("❌ Could not open video. Please try MP4 format.")
+        else:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps          = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            width        = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height       = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            duration_sec = total_frames / fps
+
+            # Info row
+            i1, i2, i3, i4 = st.columns(4)
+            i1.metric("Total Frames", total_frames)
+            i2.metric("FPS", f"{fps:.1f}")
+            i3.metric("Resolution", f"{width}×{height}")
+            i4.metric("Duration", f"{duration_sec:.1f}s")
+
+            st.divider()
+
+            # Processing options
+            opt1, opt2 = st.columns(2)
+            with opt1:
+                skip_n = st.number_input(
+                    "Process every N-th frame (1 = all frames, higher = faster)",
+                    min_value=1, max_value=30, value=2, step=1,
+                )
+            with opt2:
+                max_proc = st.number_input(
+                    "Max frames to process (0 = all)",
+                    min_value=0, max_value=total_frames, value=0, step=50,
+                )
+
+            process_btn = st.button("▶️  Start Processing", type="primary", use_container_width=True)
+
+            if process_btn:
+                # Output temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_out:
+                    tmp_out_path = tmp_out.name
+
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(tmp_out_path, fourcc, fps, (width, height))
+
+                progress_bar = st.progress(0, text="Starting…")
+                status_col1, status_col2 = st.columns([1, 1])
+                frame_preview = st.empty()
+
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                frame_idx   = 0
+                processed   = 0
+                limit       = int(max_proc) if max_proc > 0 else total_frames
+                all_detections = {}   # class → total count
+
+                while True:
+                    ret, frame = cap.read()
+                    if not ret or processed >= limit:
+                        break
+
+                    if frame_idx % int(skip_n) == 0:
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                        results = model.predict(
+                            rgb,
+                            conf=conf_threshold,
+                            iou=iou_threshold,
+                            verbose=False,
+                        )
+                        result = results[0]
+
+                        # Collect aggregate stats
+                        for box in result.boxes:
+                            cls_name = result.names[int(box.cls[0].item())]
+                            all_detections[cls_name] = all_detections.get(cls_name, 0) + 1
+
+                        # Write annotated frame
+                        annotated_rgb = result.plot()
+                        annotated_bgr = cv2.cvtColor(annotated_rgb, cv2.COLOR_RGB2BGR)
+                        writer.write(annotated_bgr)
+
+                        processed += 1
+
+                        # Update UI every 5 processed frames
+                        if processed % 5 == 0 or processed == 1:
+                            pct = min(processed / limit, 1.0)
+                            progress_bar.progress(
+                                pct,
+                                text=f"Processing… {processed}/{limit} frames ({pct:.0%})"
+                            )
+                            frame_preview.image(
+                                annotated_rgb,
+                                caption=f"Live preview — frame {frame_idx}",
+                                use_container_width=True,
+                            )
+
+                    frame_idx += 1
+
+                cap.release()
+                writer.release()
+
+                progress_bar.progress(1.0, text=f"✅ Done! Processed {processed} frames.")
+                frame_preview.empty()
+
+                # Read output and display
+                with open(tmp_out_path, "rb") as f:
+                    video_bytes = f.read()
+
+                st.success(f"✅ Video processed — {processed} frames annotated.")
+                st.video(video_bytes)
+
+                st.download_button(
+                    label="⬇️  Download Annotated Video",
+                    data=video_bytes,
+                    file_name="nitvision_output.mp4",
+                    mime="video/mp4",
+                    use_container_width=True,
+                )
+
+                # Aggregate stats
+                if all_detections:
+                    st.markdown("#### 📊 Overall Detection Summary")
+                    agg_table = [
+                        {"Class": cls, "Total Detections": count}
+                        for cls, count in sorted(all_detections.items(), key=lambda x: -x[1])
+                    ]
+                    st.table(agg_table)
+                else:
+                    st.info("No objects detected across the video. Try lowering the confidence threshold.")
+
+                # Cleanup
+                for path in [tmp_in_path, tmp_out_path]:
+                    try:
+                        os.unlink(path)
+                    except Exception:
+                        pass
+
+    else:
+        st.info("⬆️ Upload a video above to get started.")
