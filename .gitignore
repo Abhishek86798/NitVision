@@ -20,6 +20,7 @@ flir-data-set/
 # Weights / Models
 *.pt
 models/*.pt
+!models/yolov5su.pt
 notebooks/*.pt
 
 # YOLO / Ultralytics Training Runs
